@@ -15,7 +15,8 @@ from livekit.agents import (
 from livekit.plugins import google, noise_cancellation, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
-from assistant import PITCH, SPEAKING_RATE, SPEECH_STYLE, VOICE_NAME, Assistant
+from assistant import PITCH, SPEAKING_RATE, SPEECH_STYLE, VOICE_NAME, Zara
+from models import UserData
 
 logger = logging.getLogger("agent")
 
@@ -54,7 +55,8 @@ if AGENT_MODE == "realtime":
         """Gemini Live API — single realtime model handles STT, LLM, and TTS."""
         ctx.log_context_fields = {"room": ctx.room.name}
 
-        session = AgentSession(
+        session = AgentSession[UserData](
+            userdata=UserData(),
             llm=google.realtime.RealtimeModel(
                 model="gemini-live-2.5-flash-native-audio",
                 voice=VOICE_NAME,
@@ -66,7 +68,7 @@ if AGENT_MODE == "realtime":
         )
 
         await session.start(
-            agent=Assistant(),
+            agent=Zara(),
             room=ctx.room,
             room_options=_room_options(),
         )
@@ -79,7 +81,8 @@ else:
         """Traditional STT → LLM → TTS voice pipeline using Google Cloud services."""
         ctx.log_context_fields = {"room": ctx.room.name}
 
-        session = AgentSession(
+        session = AgentSession[UserData](
+            userdata=UserData(),
             stt=google.STT(
                 model="chirp_3",
                 location="eu",
@@ -109,7 +112,7 @@ else:
         )
 
         await session.start(
-            agent=Assistant(),
+            agent=Zara(),
             room=ctx.room,
             room_options=_room_options(),
         )

@@ -1,4 +1,25 @@
-from livekit.agents import Agent
+from __future__ import annotations
+
+import json
+import logging
+import os
+
+import httpx
+from livekit.agents import Agent, RunContext, function_tool
+
+import firestore_client
+from models import (
+    Booking,
+    BookingStatus,
+    CabinClass,
+    FareBreakdown,
+    FlightOption,
+    FlightSegment,
+    Passenger,
+    UserData,
+)
+
+logger = logging.getLogger("zara")
 
 # Shared voice configuration — these voice names work in both
 # google.TTS (Gemini TTS) and google.realtime.RealtimeModel (Live API).
@@ -22,17 +43,466 @@ SPEECH_STYLE = (
 )
 
 INSTRUCTIONS = (
-    "You are a helpful voice AI assistant. The user is interacting with you via voice, "
-    "even if you perceive the conversation as text.\n"
-    "You eagerly assist users with their questions by providing information from your "
-    "extensive knowledge.\n"
-    "Your responses are concise, to the point, and without any complex formatting or "
-    "punctuation including emojis, asterisks, or other symbols.\n"
-    "You are curious, friendly, and have a sense of humor.\n"
-    "Support both Urdu and English naturally."
+    "You are Zara, a voice travel assistant for a Pakistani travel agency who can speak both Urdu and English."
+    "specializing in air travel.\n\n"
+    "Identity:\n"
+    "You help customers search flights, make bookings, issue tickets, handle "
+    "cancellations, and manage their accounts. You only handle air travel. "
+    "If asked about hotels, car rentals, or anything outside air travel, "
+    "politely say that is not something you handle.\n\n"
+    "Output rules (voice-optimized):\n"
+    "Respond in plain text only. Never use markdown, bullet points, numbered "
+    "lists, asterisks, emojis, or special formatting.\n"
+    "Keep replies to one to three short sentences. Ask only one question at "
+    "a time.\n"
+    "Spell out PNR codes letter by letter, for example P as in Papa, K as "
+    "in Kilo.\n"
+    "Spell out email addresses clearly.\n"
+    "Say amounts in words, like fifteen thousand five hundred seventy five "
+    "rupees.\n"
+    "Never say JSON, parameters, function names, or technical terms.\n\n"
+    "Language:\n"
+    "Support both English and Urdu naturally. Match the language the customer "
+    "uses. Mix English and Urdu as is natural in Pakistani conversation.\n\n"
+    "Conversational style:\n"
+    "Sound like a professional Pakistani call center agent. Be polite, "
+    "confident, and warm.\n"
+    "Infer context from conversation. If the customer says me and my wife, "
+    "that means 2 passengers. If they say next Friday, work out the date. "
+    "If they say direct flight only, note that preference.\n"
+    "Assume defaults unless told otherwise. Default is 1 adult passenger in "
+    "economy class. Do not list all options like a robot.\n"
+    "When a customer says they have used your service before or have an "
+    "account, ask for their name and PIN to authenticate.\n\n"
+    "After booking and ticketing:\n"
+    "You must ask the customer to create a 4-digit PIN for their account.\n"
+    "PIN creation is required. Explain that without a PIN they will not be "
+    "able to inquire about their booking or get assistance in future calls.\n"
+    "If the customer refuses after your explanation, accept their decision "
+    "but clearly warn them one final time about the limitation.\n\n"
+    "Tools:\n"
+    "Use your tools to search flights, check fares, book flights, issue "
+    "tickets, cancel bookings, authenticate customers, create PINs, and "
+    "look up bookings.\n"
+    "Always search for flights before offering options. Never make up flight "
+    "numbers or prices.\n"
+    "Before booking, you must collect the passenger's full name, date of birth, "
+    "gender, passport number, email address, and phone number. Never use "
+    "placeholder values. If any detail is missing, ask for it.\n"
+    "After booking, always issue the ticket and send confirmation unless the "
+    "customer says otherwise.\n"
+    "When a tool returns an error, tell the customer there is a temporary issue "
+    "and suggest trying again later. Never retry the same tool call silently.\n\n"
+    "Guardrails:\n"
+    "Never fabricate flight information, prices, or PNR codes. Only use data "
+    "from your tools.\n"
+    "Do not help with anything outside air travel bookings.\n"
+    "Protect customer PINs. Never read back a PIN. Only confirm it was set.\n"
+    "If authentication fails, allow up to two retries then suggest they "
+    "continue as a new customer."
 )
 
 
-class Assistant(Agent):
+class Zara(Agent):
     def __init__(self) -> None:
         super().__init__(instructions=INSTRUCTIONS)
+
+    async def on_enter(self) -> None:
+        self.session.generate_reply(
+            instructions=(
+                "You are initiating the conversation. The customer has not spoken yet. "
+                "Say exactly: Assalamualaikum, Aap ki baat Zara sy horahi hai, "
+                "how can I help you today? Do not say Walaikum Asalam — that is "
+                "a reply, not an opening greeting."
+            )
+        )
+
+    @function_tool()
+    async def search_flights(
+        self,
+        context: RunContext[UserData],
+        origin: str,
+        destination: str,
+        travel_date: str,
+        cabin_class: str = "economy",
+        num_passengers: int = 1,
+    ) -> str:
+        """Search for available flights between two cities.
+
+        Args:
+            origin: Origin city or location name as spoken by the customer
+            destination: Destination city or location name as spoken by the customer
+            travel_date: Travel date in YYYY-MM-DD format
+            cabin_class: Cabin class preference (economy, premium_economy, business, first)
+            num_passengers: Number of passengers
+        """
+        webhook_url = os.getenv("N8N_FLIGHTS_WEBHOOK_URL")
+        if not webhook_url:
+            return "Flight search is temporarily unavailable. Please try again later."
+
+        payload = {
+            "origin": origin,
+            "destination": destination,
+            "travel_date": travel_date,
+            "cabin_class": cabin_class,
+            "num_passengers": num_passengers,
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(webhook_url, json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception:
+            logger.exception("Flight search webhook failed")
+            return (
+                "I am sorry, I could not reach the flight search service right now. "
+                "Please try again in a moment."
+            )
+
+        flights = data.get("flights", [])
+        if not flights:
+            return (
+                f"I could not find any flights from {origin} to {destination} "
+                f"on {travel_date}. Would you like to try a different date?"
+            )
+
+        options: list[FlightOption] = []
+        for i, f in enumerate(flights, 1):
+            fare_data = f.get("fare", {})
+            cabin = CabinClass(fare_data.get("cabin_class", cabin_class))
+            option = FlightOption(
+                option_id=f"OPT-{i}",
+                segment=FlightSegment(
+                    flight_number=f["flight_number"],
+                    airline=f["airline"],
+                    origin=f["origin"],
+                    destination=f["destination"],
+                    departure_time=f["departure_time"],
+                    arrival_time=f["arrival_time"],
+                    duration_minutes=f["duration_minutes"],
+                    aircraft=f.get("aircraft", ""),
+                ),
+                fare=FareBreakdown(
+                    base_fare=fare_data["base_fare"],
+                    taxes=fare_data["taxes"],
+                    fuel_surcharge=fare_data["fuel_surcharge"],
+                    total=fare_data["total"],
+                    cabin_class=cabin,
+                ),
+                seats_available=f.get("seats_available", 0),
+            )
+            options.append(option)
+
+        context.userdata.flight_options = options
+
+        # Build readable summary
+        lines = []
+        for opt in options:
+            s = opt.segment
+            lines.append(
+                f"Option {opt.option_id}: {s.airline} flight {s.flight_number}, "
+                f"departing {s.departure_time} arriving {s.arrival_time}, "
+                f"duration {s.duration_minutes} minutes, "
+                f"total fare {opt.fare.total} rupees, "
+                f"{opt.seats_available} seats available"
+            )
+        return ". ".join(lines)
+
+    @function_tool()
+    async def get_fare_details(
+        self,
+        context: RunContext[UserData],
+        option_number: int,
+    ) -> str:
+        """Get detailed fare breakdown for a flight option.
+
+        Args:
+            option_number: The option number from the search results (1, 2, 3, etc.)
+        """
+        options = context.userdata.flight_options
+        if not options:
+            return (
+                "No flight search results available. Please search for flights first."
+            )
+
+        idx = option_number - 1
+        if idx < 0 or idx >= len(options):
+            return f"Invalid option number. Please choose between 1 and {len(options)}."
+
+        opt = options[idx]
+        fare = opt.fare
+        return (
+            f"Fare breakdown for {opt.segment.airline} flight "
+            f"{opt.segment.flight_number}: "
+            f"Base fare {fare.base_fare} rupees, "
+            f"taxes {fare.taxes} rupees, "
+            f"fuel surcharge {fare.fuel_surcharge} rupees, "
+            f"total {fare.total} rupees in {fare.cabin_class.value} class"
+        )
+
+    @function_tool()
+    async def book_flight(
+        self,
+        context: RunContext[UserData],
+        option_number: int,
+        passengers: str,
+        contact_email: str,
+        contact_phone: str,
+    ) -> str:
+        """Book a flight for the given passengers. IMPORTANT: You must collect all passenger details and contact information from the customer BEFORE calling this tool. Never use placeholder values like not_provided or unknown. If any required information is missing, ask the customer for it instead of calling this tool.
+
+        Args:
+            option_number: The option number from the search results (1, 2, 3, etc.)
+            passengers: JSON array of passenger objects. Each must have real values for: title, first_name, last_name, date_of_birth (YYYY-MM-DD), gender, passport_number, contact_phone
+            contact_email: The customer's real email address collected from conversation
+            contact_phone: The customer's real phone number collected from conversation
+        """
+        options = context.userdata.flight_options
+        if not options:
+            return (
+                "No flight search results available. Please search for flights first."
+            )
+
+        idx = option_number - 1
+        if idx < 0 or idx >= len(options):
+            return f"Invalid option number. Please choose between 1 and {len(options)}."
+
+        # Reject placeholder values
+        placeholders = {"not_provided", "unknown", "n/a", "none", "null", ""}
+        if contact_email.strip().lower() in placeholders:
+            return "I need the customer's email address before I can book. Please ask them."
+        if contact_phone.strip().lower() in placeholders:
+            return (
+                "I need the customer's phone number before I can book. Please ask them."
+            )
+
+        try:
+            pax_list = json.loads(passengers)
+        except json.JSONDecodeError:
+            return "I could not process the passenger details. Please try again."
+
+        if not pax_list:
+            return "No passenger details provided. Please collect passenger information first."
+
+        for p in pax_list:
+            name = f"{p.get('first_name', '')} {p.get('last_name', '')}".strip()
+            if not name or name.lower() in placeholders:
+                return "I need each passenger's real name before booking. Please ask the customer."
+
+        pax_objects = [
+            Passenger(
+                title=p.get("title", ""),
+                first_name=p.get("first_name", ""),
+                last_name=p.get("last_name", ""),
+                date_of_birth=p.get("date_of_birth", ""),
+                gender=p.get("gender", ""),
+                passport_number=p.get("passport_number", ""),
+                contact_phone=p.get("contact_phone", ""),
+            )
+            for p in pax_list
+        ]
+
+        opt = options[idx]
+        booking = Booking(
+            pnr="",  # will be generated by firestore_client
+            flight=opt.segment,
+            fare=opt.fare,
+            passengers=pax_objects,
+            contact_email=contact_email,
+            contact_phone=contact_phone,
+            status=BookingStatus.CONFIRMED,
+            created_at="",  # will be set by firestore_client
+        )
+
+        try:
+            await firestore_client.save_booking(booking)
+        except Exception:
+            logger.exception("Failed to save booking")
+            return "There is a system issue preventing the booking right now. Do not retry automatically. Inform the customer and ask them to try again later."
+
+        context.userdata.current_pnr = booking.pnr
+        return (
+            f"Booking confirmed. Your PNR is {booking.pnr}. "
+            f"Flight {opt.segment.flight_number} from {opt.segment.origin} to "
+            f"{opt.segment.destination} on {opt.segment.departure_time}. "
+            f"Total fare {opt.fare.total} rupees for {len(pax_objects)} passenger(s)."
+        )
+
+    @function_tool()
+    async def issue_ticket(
+        self,
+        context: RunContext[UserData],
+        pnr: str,
+    ) -> str:
+        """Issue a ticket for an existing confirmed booking.
+
+        Args:
+            pnr: The 6-character PNR code of the booking
+        """
+        try:
+            booking = await firestore_client.update_booking_status(
+                pnr, BookingStatus.TICKETED
+            )
+        except Exception:
+            logger.exception("Failed to issue ticket")
+            return (
+                "I am sorry, there was an error issuing the ticket. Please try again."
+            )
+
+        if not booking:
+            return f"I could not find a booking with PNR {pnr}."
+
+        # Stub: log confirmation email (real sending added later)
+        logger.info(
+            "Confirmation email would be sent to %s for PNR %s",
+            booking.contact_email,
+            pnr,
+        )
+
+        return (
+            f"Ticket issued successfully for PNR {pnr}. "
+            f"A confirmation email will be sent to {booking.contact_email}."
+        )
+
+    @function_tool()
+    async def cancel_booking(
+        self,
+        context: RunContext[UserData],
+        pnr: str,
+    ) -> str:
+        """Cancel an existing booking.
+
+        Args:
+            pnr: The 6-character PNR code of the booking to cancel
+        """
+        try:
+            booking = await firestore_client.update_booking_status(
+                pnr, BookingStatus.CANCELLED
+            )
+        except Exception:
+            logger.exception("Failed to cancel booking")
+            return "I am sorry, there was an error cancelling the booking. Please try again."
+
+        if not booking:
+            return f"I could not find a booking with PNR {pnr}."
+
+        return f"Booking {pnr} has been cancelled successfully."
+
+    @function_tool()
+    async def lookup_booking(
+        self,
+        context: RunContext[UserData],
+        pnr: str,
+    ) -> str:
+        """Look up details of an existing booking.
+
+        Args:
+            pnr: The 6-character PNR code to look up
+        """
+        try:
+            booking = await firestore_client.get_booking(pnr)
+        except Exception:
+            logger.exception("Failed to look up booking")
+            return "I am sorry, I could not look up that booking right now. Please try again."
+
+        if not booking:
+            return f"I could not find a booking with PNR {pnr}."
+
+        pax_names = ", ".join(
+            f"{p.title} {p.first_name} {p.last_name}" for p in booking.passengers
+        )
+        return (
+            f"Booking {booking.pnr}: {booking.flight.airline} flight "
+            f"{booking.flight.flight_number} from {booking.flight.origin} to "
+            f"{booking.flight.destination}, departing {booking.flight.departure_time}. "
+            f"Status {booking.status.value}. "
+            f"Passengers: {pax_names}. "
+            f"Total fare {booking.fare.total} rupees."
+        )
+
+    @function_tool()
+    async def authenticate_customer(
+        self,
+        context: RunContext[UserData],
+        name: str,
+        pin: str,
+    ) -> str:
+        """Authenticate a returning customer using their name and PIN.
+
+        Args:
+            name: The customer's name
+            pin: The customer's 4-digit PIN
+        """
+        try:
+            profile = await firestore_client.authenticate_customer(name, pin)
+        except Exception:
+            logger.exception("Authentication failed")
+            return "I am sorry, I could not verify your account right now. Please try again."
+
+        if not profile:
+            return (
+                "I could not verify those details. "
+                "Please check your name and PIN and try again."
+            )
+
+        context.userdata.is_authenticated = True
+        context.userdata.customer_profile = profile
+
+        # Inject customer context
+        bookings = await firestore_client.get_customer_bookings(profile.customer_id)
+        booking_summary = ", ".join(b.pnr for b in bookings) if bookings else "none"
+        chat_ctx = self.chat_ctx.copy()
+        chat_ctx.add_message(
+            role="system",
+            content=(
+                f"Customer authenticated. Name: {profile.name}. "
+                f"Email: {profile.email}. Phone: {profile.phone}. "
+                f"Previous bookings: {booking_summary}. "
+                f"Personalize all responses."
+            ),
+        )
+        await self.update_chat_ctx(chat_ctx)
+
+        return (
+            f"Welcome back, {profile.name}. You are now verified. "
+            f"How can I help you today?"
+        )
+
+    @function_tool()
+    async def create_customer_pin(
+        self,
+        context: RunContext[UserData],
+        name: str,
+        email: str,
+        phone: str,
+        pin: str,
+    ) -> str:
+        """Create a new customer account with a 4-digit PIN.
+
+        Args:
+            name: The customer's full name
+            email: The customer's email address
+            phone: The customer's phone number
+            pin: A 4-digit PIN chosen by the customer
+        """
+        if not pin.isdigit() or len(pin) != 4:
+            return "The PIN must be exactly 4 digits. Please choose a valid PIN."
+
+        pnr = context.userdata.current_pnr
+
+        try:
+            profile = await firestore_client.create_customer(
+                name=name, email=email, phone=phone, pin=pin, pnr=pnr
+            )
+        except Exception:
+            logger.exception("Failed to create customer")
+            return "I am sorry, I could not create your account right now. Please try again."
+
+        context.userdata.is_authenticated = True
+        context.userdata.customer_profile = profile
+
+        return (
+            "Your account has been created and your PIN has been set successfully. "
+            "You can use your name and PIN to access your bookings in future calls."
+        )
