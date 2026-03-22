@@ -79,7 +79,7 @@ account, ask for their name and PIN to authenticate.
 # Routing
 
 When the customer wants to search for flights, book a flight, or anything \
-related to making a new booking, transfer them to the booking team but collect the information before transferring.
+related to making a new booking, transfer them to the booking team.
 
 # Tools
 
@@ -100,7 +100,7 @@ continue as a new customer.\
 BOOKING_INSTRUCTIONS = """\
 # Identity
 
-You are Zara's female booking specialist. You handle flight search, fare details, \
+You are Zara's booking specialist. You handle flight search, fare details, \
 booking, ticketing, and account creation for a Pakistani travel agency. \
 You speak both Urdu and English.
 
@@ -189,7 +189,7 @@ class Zara(Agent):
 
     @function_tool()
     async def transfer_to_booking(self, context: RunContext):
-        """Transfer to the booking specialist when the customer wants to book flights."""
+        """Transfer to the booking specialist when the customer wants to search or book flights."""
         return BookingAgent(chat_ctx=self.chat_ctx), "Transferring to booking"
 
     @function_tool()
