@@ -3,7 +3,7 @@ import json
 import pytest
 from livekit.agents import AgentSession, inference, llm, mock_tools
 
-from assistant import Zara
+from assistant import BookingAgent, Zara
 from models import UserData
 
 
@@ -69,7 +69,45 @@ async def test_out_of_scope_refusal() -> None:
         result.expect.no_more_events()
 
 
-# --- B. Flight search ---
+# --- B. Handoffs ---
+
+
+@pytest.mark.asyncio
+async def test_handoff_to_booking() -> None:
+    """Zara transfers to BookingAgent when user wants to book flights."""
+    async with (
+        _llm() as llm,
+        _session(llm=llm) as session,
+    ):
+        await session.start(Zara())
+
+        result = await session.run(
+            user_input="I want to search for flights from Karachi to Lahore"
+        )
+
+        result.expect.contains_agent_handoff(new_agent_type=BookingAgent)
+
+
+@pytest.mark.asyncio
+async def test_handoff_back_to_main() -> None:
+    """BookingAgent transfers back to Zara when booking flow is done."""
+    async with (
+        _llm() as llm,
+        _session(llm=llm) as session,
+    ):
+        await session.start(BookingAgent())
+
+        result = await session.run(
+            user_input=(
+                "Everything is done, my booking is complete and PIN is set. "
+                "Please transfer me back to the main agent."
+            )
+        )
+
+        result.expect.contains_agent_handoff(new_agent_type=Zara)
+
+
+# --- C. Flight search ---
 
 
 def _mock_search_flights(
@@ -93,9 +131,9 @@ async def test_search_flights_tool_call() -> None:
         _llm() as llm,
         _session(llm=llm) as session,
     ):
-        await session.start(Zara())
+        await session.start(BookingAgent())
 
-        with mock_tools(Zara, {"search_flights": _mock_search_flights}):
+        with mock_tools(BookingAgent, {"search_flights": _mock_search_flights}):
             result = await session.run(
                 user_input=(
                     "I want to fly from Karachi to Lahore on 15 April 2026, "
@@ -127,9 +165,9 @@ async def test_search_infers_defaults() -> None:
         _llm() as llm,
         _session(llm=llm) as session,
     ):
-        await session.start(Zara())
+        await session.start(BookingAgent())
 
-        with mock_tools(Zara, {"search_flights": _mock_search_flights}):
+        with mock_tools(BookingAgent, {"search_flights": _mock_search_flights}):
             result = await session.run(
                 user_input="Search flights from Islamabad to Karachi on 20 April 2026"
             )
@@ -140,7 +178,7 @@ async def test_search_infers_defaults() -> None:
             assert args.get("cabin_class", "economy") == "economy"
 
 
-# --- C. Fare details ---
+# --- D. Fare details ---
 
 
 def _mock_get_fare_details(option_number: int) -> str:
@@ -158,10 +196,10 @@ async def test_fare_breakdown() -> None:
         _llm() as llm,
         _session(llm=llm) as session,
     ):
-        await session.start(Zara())
+        await session.start(BookingAgent())
 
         with mock_tools(
-            Zara,
+            BookingAgent,
             {
                 "search_flights": _mock_search_flights,
                 "get_fare_details": _mock_get_fare_details,
@@ -193,7 +231,7 @@ async def test_fare_breakdown() -> None:
             )
 
 
-# --- D. Booking ---
+# --- E. Booking ---
 
 
 def _mock_book_flight(
@@ -216,10 +254,10 @@ async def test_book_flight() -> None:
         _llm() as llm,
         _session(llm=llm) as session,
     ):
-        await session.start(Zara())
+        await session.start(BookingAgent())
 
         with mock_tools(
-            Zara,
+            BookingAgent,
             {
                 "search_flights": _mock_search_flights,
                 "book_flight": _mock_book_flight,
@@ -258,10 +296,10 @@ async def test_issue_ticket_after_booking() -> None:
         _llm() as llm,
         _session(llm=llm) as session,
     ):
-        await session.start(Zara())
+        await session.start(BookingAgent())
 
         with mock_tools(
-            Zara,
+            BookingAgent,
             {
                 "search_flights": _mock_search_flights,
                 "book_flight": _mock_book_flight,
@@ -289,7 +327,7 @@ async def test_issue_ticket_after_booking() -> None:
             result.expect.contains_function_call(name="issue_ticket")
 
 
-# --- E. Cancellation ---
+# --- F. Cancellation ---
 
 
 def _mock_cancel_booking(pnr: str) -> str:
@@ -323,7 +361,7 @@ async def test_cancel_booking() -> None:
             )
 
 
-# --- F. Authentication ---
+# --- G. Authentication ---
 
 
 def _mock_auth_success(name: str, pin: str) -> str:
@@ -379,7 +417,7 @@ async def test_authenticate_failure() -> None:
                     llm,
                     intent=(
                         "Tells the customer that verification failed and "
-                        "suggests trying again or continuing as new customer. "
+                        "suggests they check their details or try again. "
                         "May respond in English, Urdu, or a mix of both. "
                         "Does not show technical errors."
                     ),
@@ -387,7 +425,7 @@ async def test_authenticate_failure() -> None:
             )
 
 
-# --- G. PIN creation & bilingual ---
+# --- H. PIN creation & bilingual ---
 
 
 def _mock_create_pin(name: str, email: str, phone: str, pin: str) -> str:
@@ -404,10 +442,10 @@ async def test_create_pin() -> None:
         _llm() as llm,
         _session(llm=llm) as session,
     ):
-        await session.start(Zara())
+        await session.start(BookingAgent())
 
         with mock_tools(
-            Zara,
+            BookingAgent,
             {
                 "search_flights": _mock_search_flights,
                 "book_flight": _mock_book_flight,
@@ -442,14 +480,14 @@ async def test_create_pin() -> None:
 
 @pytest.mark.asyncio
 async def test_bilingual_urdu_english() -> None:
-    """Zara handles mixed Urdu/English input helpfully."""
+    """BookingAgent handles mixed Urdu/English input helpfully."""
     async with (
         _llm() as llm,
         _session(llm=llm) as session,
     ):
-        await session.start(Zara())
+        await session.start(BookingAgent())
 
-        with mock_tools(Zara, {"search_flights": _mock_search_flights}):
+        with mock_tools(BookingAgent, {"search_flights": _mock_search_flights}):
             result = await session.run(
                 user_input="Mujhe Karachi se Lahore jaana hai, 15 April ko flight dekhein"
             )
