@@ -47,24 +47,11 @@ class FlightOption:
 
 
 @dataclass
-class Passenger:
-    title: str
-    first_name: str
-    last_name: str
-    date_of_birth: str
-    gender: str
-    passport_number: str
-    contact_phone: str
-
-
-@dataclass
 class Booking:
     pnr: str
+    customer_id: str
     flight: FlightSegment
     fare: FareBreakdown
-    passengers: list[Passenger]
-    contact_email: str
-    contact_phone: str
     status: BookingStatus
     created_at: str
 
@@ -76,6 +63,9 @@ class CustomerProfile:
     pin: str
     email: str
     phone: str
+    date_of_birth: str = ""
+    gender: str = ""
+    passport_number: str = ""
     bookings: list[str] = field(default_factory=list)
 
 
@@ -85,3 +75,4 @@ class UserData:
     customer_profile: CustomerProfile | None = None
     flight_options: list[FlightOption] = field(default_factory=list)
     current_pnr: str | None = None
+    _booking_details: dict = field(default_factory=dict)

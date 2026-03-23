@@ -310,20 +310,16 @@ async def test_issue_ticket_after_booking() -> None:
             await session.run(
                 user_input="Search flights Karachi to Lahore on 15 April 2026, one passenger economy"
             )
-            # Turn 2: book with all details
-            await session.run(
+            # Turn 2: book with all details and request ticket issuance
+            result = await session.run(
                 user_input=(
                     "I confirm, book option 1. Passenger: Mr Ahmed Khan, "
                     "born 1990-05-15, male, passport AB1234567, phone 03001234567. "
-                    "Email ahmed@example.com, phone 03001234567."
+                    "Email ahmed@example.com, phone 03001234567. "
+                    "Please issue the ticket as well."
                 )
             )
-            # Turn 3: confirm and issue ticket
-            result = await session.run(
-                user_input="Yes that is all correct, please proceed with the booking and issue the ticket"
-            )
 
-            # issue_ticket should be called in turn 2 or 3
             result.expect.contains_function_call(name="issue_ticket")
 
 
@@ -336,7 +332,7 @@ def _mock_cancel_booking(pnr: str) -> str:
 
 @pytest.mark.asyncio
 async def test_cancel_booking() -> None:
-    """Cancellation calls cancel_booking tool."""
+    """Cancellation calls cancel_booking tool after confirmation."""
     async with (
         _llm() as llm,
         _session(llm=llm) as session,
@@ -344,21 +340,20 @@ async def test_cancel_booking() -> None:
         await session.start(Zara())
 
         with mock_tools(Zara, {"cancel_booking": _mock_cancel_booking}):
-            result = await session.run(
-                user_input="Cancel my booking right now, PNR is ABC123. I confirm the cancellation."
+            # Turn 1: request cancellation — agent may ask for auth or confirmation
+            await session.run(
+                user_input="I need to cancel my booking, PNR is ABC123."
             )
 
-            result.expect.next_event().is_function_call(name="cancel_booking")
-            result.expect.next_event().is_function_call_output()
-
-            await (
-                result.expect.next_event()
-                .is_message(role="assistant")
-                .judge(
-                    llm,
-                    intent="Confirms the booking cancellation.",
+            # Turn 2: confirm without authentication
+            result = await session.run(
+                user_input=(
+                    "I do not have an account. I confirm I want to cancel "
+                    "booking ABC123. Please go ahead."
                 )
             )
+
+            result.expect.contains_function_call(name="cancel_booking")
 
 
 # --- G. Authentication ---

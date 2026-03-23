@@ -13,7 +13,6 @@ from models import (
     CustomerProfile,
     FareBreakdown,
     FlightSegment,
-    Passenger,
 )
 
 _db: AsyncClient | None = None
@@ -33,6 +32,7 @@ def _generate_pnr() -> str:
 def _booking_to_dict(booking: Booking) -> dict:
     return {
         "pnr": booking.pnr,
+        "customer_id": booking.customer_id,
         "flight": {
             "flight_number": booking.flight.flight_number,
             "airline": booking.flight.airline,
@@ -50,20 +50,6 @@ def _booking_to_dict(booking: Booking) -> dict:
             "total": booking.fare.total,
             "cabin_class": booking.fare.cabin_class.value,
         },
-        "passengers": [
-            {
-                "title": p.title,
-                "first_name": p.first_name,
-                "last_name": p.last_name,
-                "date_of_birth": p.date_of_birth,
-                "gender": p.gender,
-                "passport_number": p.passport_number,
-                "contact_phone": p.contact_phone,
-            }
-            for p in booking.passengers
-        ],
-        "contact_email": booking.contact_email,
-        "contact_phone": booking.contact_phone,
         "status": booking.status.value,
         "created_at": booking.created_at,
     }
@@ -74,6 +60,7 @@ def _dict_to_booking(data: dict) -> Booking:
     fare = data["fare"]
     return Booking(
         pnr=data["pnr"],
+        customer_id=data.get("customer_id", ""),
         flight=FlightSegment(
             flight_number=flight["flight_number"],
             airline=flight["airline"],
@@ -91,20 +78,6 @@ def _dict_to_booking(data: dict) -> Booking:
             total=fare["total"],
             cabin_class=CabinClass(fare["cabin_class"]),
         ),
-        passengers=[
-            Passenger(
-                title=p["title"],
-                first_name=p["first_name"],
-                last_name=p["last_name"],
-                date_of_birth=p["date_of_birth"],
-                gender=p["gender"],
-                passport_number=p["passport_number"],
-                contact_phone=p["contact_phone"],
-            )
-            for p in data["passengers"]
-        ],
-        contact_email=data["contact_email"],
-        contact_phone=data["contact_phone"],
         status=BookingStatus(data["status"]),
         created_at=data["created_at"],
     )
@@ -158,12 +131,22 @@ async def authenticate_customer(name: str, pin: str) -> CustomerProfile | None:
         pin=data["pin"],
         email=data["email"],
         phone=data["phone"],
+        date_of_birth=data.get("date_of_birth", ""),
+        gender=data.get("gender", ""),
+        passport_number=data.get("passport_number", ""),
         bookings=data.get("bookings", []),
     )
 
 
 async def create_customer(
-    name: str, email: str, phone: str, pin: str, pnr: str | None = None
+    name: str,
+    email: str,
+    phone: str,
+    pin: str,
+    date_of_birth: str = "",
+    gender: str = "",
+    passport_number: str = "",
+    pnr: str | None = None,
 ) -> CustomerProfile:
     db = _get_db()
     bookings = [pnr] if pnr else []
@@ -172,6 +155,9 @@ async def create_customer(
         "pin": pin,
         "email": email,
         "phone": phone,
+        "date_of_birth": date_of_birth,
+        "gender": gender,
+        "passport_number": passport_number,
         "bookings": bookings,
     }
     _, doc_ref = await db.collection("customers").add(data)
@@ -181,7 +167,24 @@ async def create_customer(
         pin=pin,
         email=email,
         phone=phone,
+        date_of_birth=date_of_birth,
+        gender=gender,
+        passport_number=passport_number,
         bookings=bookings,
+    )
+
+
+async def update_customer(customer_id: str, **fields) -> None:
+    db = _get_db()
+    await db.collection("customers").document(customer_id).update(fields)
+
+
+async def add_booking_to_customer(customer_id: str, pnr: str) -> None:
+    from google.cloud.firestore_v1 import ArrayUnion
+
+    db = _get_db()
+    await db.collection("customers").document(customer_id).update(
+        {"bookings": ArrayUnion([pnr])}
     )
 
 
